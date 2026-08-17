@@ -7,7 +7,7 @@
 
     <groupId>com.ourgiant.s3</groupId>
     <artifactId>s3-browser</artifactId>
-    <version>0.1.1</version>
+    <version>0.1.2</version>
     <packaging>jar</packaging>
 
     <name>S3 Browser</name>
@@ -25,6 +25,7 @@
         <logback.version>1.5.37</logback.version>
         <flatlaf.version>3.7.2</flatlaf.version>
         <jackson.version>2.22.1</jackson.version>
+        <selenium.version>4.46.0</selenium.version>
     </properties>
 
     <dependencies>
@@ -112,6 +113,18 @@
             <groupId>com.fasterxml.jackson.core</groupId>
             <artifactId>jackson-databind</artifactId>
             <version>${jackson.version}</version>
+        </dependency>
+
+        <!-- Launches the ephemeral browser session behind "Open in Console" (see
+             core.AwsConsoleLauncher / gui.ObjectBrowserPanel), ported from aws-idp-saml-ui's
+             same feature. Each ChromeDriver instance gets its own fresh, disposable browser
+             profile - that per-instance isolation is what makes the console session
+             "ephemeral", not an OS-level incognito/private-window flag. Selenium 4.6+'s bundled
+             Selenium Manager also handles Chrome/chromedriver discovery per OS automatically. -->
+        <dependency>
+            <groupId>org.seleniumhq.selenium</groupId>
+            <artifactId>selenium-java</artifactId>
+            <version>${selenium.version}</version>
         </dependency>
 
         <!-- Test dependencies -->

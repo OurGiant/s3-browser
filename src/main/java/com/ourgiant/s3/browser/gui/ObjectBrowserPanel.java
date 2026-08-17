@@ -1,12 +1,19 @@
 package com.ourgiant.s3.browser.gui;
 
+import com.ourgiant.s3.browser.core.AwsConsoleLauncher;
 import com.ourgiant.s3.browser.core.GetObjectRequests;
 import com.ourgiant.s3.browser.core.ObjectGridModel;
 import com.ourgiant.s3.browser.core.ObjectListRequests;
 import com.ourgiant.s3.browser.core.S3Arns;
+import com.ourgiant.s3.browser.core.S3ConsoleUrls;
 import com.ourgiant.s3.browser.model.S3Entry;
+import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.chrome.ChromeDriver;
+import org.openqa.selenium.chrome.ChromeOptions;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import software.amazon.awssdk.auth.credentials.AwsCredentials;
+import software.amazon.awssdk.auth.credentials.AwsCredentialsProvider;
 import software.amazon.awssdk.core.exception.SdkException;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
@@ -37,6 +44,7 @@ import java.io.File;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 
 /**
@@ -50,7 +58,10 @@ import java.util.List;
  * button saves the selected object to a local file via GetObject, mirroring Upload's
  * overwrite-confirmation caution in reverse (see downloadSelectedEntry). Copy Bucket ARN/Copy
  * Bucket URL copy the current bucket's identifiers to the clipboard (see core.S3Arns); the
- * per-object equivalents live in ObjectDetailDialog.
+ * per-object equivalents live in ObjectDetailDialog. Open in Console signs the connected
+ * profile into the AWS Console via the federation endpoint (see core.AwsConsoleLauncher) and
+ * opens it in a fresh, disposable ChromeDriver session scoped to the current bucket+prefix -
+ * ported from aws-idp-saml-ui's same feature.
  */
 public class ObjectBrowserPanel extends JPanel {
     private static final Logger log = LoggerFactory.getLogger(ObjectBrowserPanel.class);
@@ -58,8 +69,11 @@ public class ObjectBrowserPanel extends JPanel {
 
     private final Frame owner;
     private final Runnable onBackToBuckets;
+    private final List<WebDriver> openConsoleDrivers = Collections.synchronizedList(new ArrayList<>());
 
     private S3Client s3;
+    private AwsCredentialsProvider consoleCredentialsProvider;
+    private String consoleRegion;
     private String currentBucket;
     private String currentPrefix = "";
 
@@ -70,6 +84,7 @@ public class ObjectBrowserPanel extends JPanel {
     private JButton loadMoreButton;
     private JButton downloadButton;
     private JProgressBar downloadProgressBar;
+    private JButton openInConsoleButton;
     private final List<S3Entry> allEntries = new ArrayList<>();
     private String nextToken;
 
@@ -77,6 +92,7 @@ public class ObjectBrowserPanel extends JPanel {
         this.owner = owner;
         this.onBackToBuckets = onBackToBuckets;
         buildUi();
+        Runtime.getRuntime().addShutdownHook(new Thread(this::quitOpenConsoleDrivers, "console-driver-cleanup"));
     }
 
     private void buildUi() {
@@ -93,11 +109,14 @@ public class ObjectBrowserPanel extends JPanel {
         copyBucketArnButton.addActionListener(e -> ClipboardUtil.copy(S3Arns.bucketArn(currentBucket)));
         JButton copyBucketUrlButton = new JButton("Copy Bucket URL");
         copyBucketUrlButton.addActionListener(e -> ClipboardUtil.copy(S3Arns.bucketUrl(currentBucket)));
+        openInConsoleButton = new JButton("Open in Console");
+        openInConsoleButton.addActionListener(e -> openInConsole());
         controlsRow.add(backButton);
         controlsRow.add(bucketLabel);
         controlsRow.add(refreshButton);
         controlsRow.add(copyBucketArnButton);
         controlsRow.add(copyBucketUrlButton);
+        controlsRow.add(openInConsoleButton);
         topPanel.add(controlsRow, BorderLayout.NORTH);
 
         breadcrumbPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 2, 0));
@@ -157,6 +176,14 @@ public class ObjectBrowserPanel extends JPanel {
 
     public void setClient(S3Client s3) {
         this.s3 = s3;
+    }
+
+    /** Credentials/region behind Open in Console (see openInConsole) - separate from setClient
+     *  since building the console federation URL needs the raw temporary credentials, not just
+     *  an already-built S3Client. */
+    public void setConsoleContext(AwsCredentialsProvider credentialsProvider, String region) {
+        this.consoleCredentialsProvider = credentialsProvider;
+        this.consoleRegion = region;
     }
 
     /** Opens a bucket at its root - the entry point from BucketListPanel. */
@@ -251,6 +278,73 @@ public class ObjectBrowserPanel extends JPanel {
 
     private void openUploadDialog() {
         new UploadDialog(owner, s3, currentBucket, currentPrefix, () -> navigateTo(currentPrefix)).setVisible(true);
+    }
+
+    /**
+     * Signs the connected profile into the AWS Console (via the federation endpoint - see
+     * core.AwsConsoleLauncher) and opens it at the current bucket+prefix in a fresh ChromeDriver
+     * session. Each click gets its own driver instance/cookie jar rather than reusing one across
+     * clicks, so consoles opened for different profiles or locations don't collide.
+     */
+    private void openInConsole() {
+        if (consoleCredentialsProvider == null) {
+            return;
+        }
+
+        String bucket = currentBucket;
+        String prefix = currentPrefix;
+        String region = consoleRegion;
+        openInConsoleButton.setEnabled(false);
+        openInConsoleButton.setText("Opening...");
+
+        new SwingWorker<WebDriver, Void>() {
+            @Override
+            protected WebDriver doInBackground() throws Exception {
+                AwsCredentials credentials = consoleCredentialsProvider.resolveCredentials();
+                String destination = S3ConsoleUrls.bucketPrefixUrl(bucket, prefix, region);
+                String loginUrl = AwsConsoleLauncher.buildLoginUrl(credentials, destination);
+
+                ChromeOptions options = new ChromeOptions();
+                options.addArguments("--disable-dev-shm-usage");
+                WebDriver driver = new ChromeDriver(options);
+                try {
+                    driver.get(loginUrl);
+                } catch (Exception e) {
+                    driver.quit();
+                    throw e;
+                }
+                return driver;
+            }
+
+            @Override
+            protected void done() {
+                openInConsoleButton.setEnabled(true);
+                openInConsoleButton.setText("Open in Console");
+                try {
+                    openConsoleDrivers.add(get());
+                } catch (Exception e) {
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    log.error("Failed to open AWS Console for bucket {}", bucket, cause);
+                    JOptionPane.showMessageDialog(ObjectBrowserPanel.this,
+                        "Failed to open AWS Console: " + (cause.getMessage() != null ? cause.getMessage() : cause.getClass().getSimpleName()),
+                        "Console Error", JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        }.execute();
+    }
+
+    /** Quits every still-open console browser session so none are orphaned after app exit. */
+    private void quitOpenConsoleDrivers() {
+        synchronized (openConsoleDrivers) {
+            for (WebDriver driver : openConsoleDrivers) {
+                try {
+                    driver.quit();
+                } catch (Exception e) {
+                    log.warn("Failed to close a console browser window on shutdown", e);
+                }
+            }
+            openConsoleDrivers.clear();
+        }
     }
 
     /**
