@@ -26,10 +26,12 @@ import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
 import javax.swing.JProgressBar;
+import javax.swing.DropMode;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.ListSelectionModel;
 import javax.swing.SwingWorker;
+import javax.swing.TransferHandler;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableCellRenderer;
 import java.awt.BorderLayout;
@@ -38,6 +40,7 @@ import java.awt.Cursor;
 import java.awt.FlowLayout;
 import java.awt.Frame;
 import java.awt.Insets;
+import java.awt.datatransfer.DataFlavor;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.File;
@@ -61,7 +64,11 @@ import java.util.List;
  * per-object equivalents live in ObjectDetailDialog. Open in Console signs the connected
  * profile into the AWS Console via the federation endpoint (see core.AwsConsoleLauncher) and
  * opens it in a fresh, disposable ChromeDriver session scoped to the current bucket+prefix -
- * ported from aws-idp-saml-ui's same feature.
+ * ported from aws-idp-saml-ui's same feature. Dragging a single local file onto the object
+ * table pre-selects it in the same UploadDialog the Upload button opens (see
+ * fileDropTransferHandler) - a faster path to the picker, not a bypass of it; the user still
+ * confirms via the Upload button, and a multi-file drop is rejected with a message rather than
+ * silently reopening upload's single-file scope.
  */
 public class ObjectBrowserPanel extends JPanel {
     private static final Logger log = LoggerFactory.getLogger(ObjectBrowserPanel.class);
@@ -151,6 +158,8 @@ public class ObjectBrowserPanel extends JPanel {
                 }
             }
         });
+        table.setDropMode(DropMode.ON);
+        table.setTransferHandler(fileDropTransferHandler());
         add(new JScrollPane(table), BorderLayout.CENTER);
 
         JPanel bottomPanel = new JPanel();
@@ -277,7 +286,53 @@ public class ObjectBrowserPanel extends JPanel {
     }
 
     private void openUploadDialog() {
-        new UploadDialog(owner, s3, currentBucket, currentPrefix, () -> navigateTo(currentPrefix)).setVisible(true);
+        openUploadDialog(null);
+    }
+
+    private void openUploadDialog(File preSelectedFile) {
+        UploadDialog dialog = new UploadDialog(owner, s3, currentBucket, currentPrefix, () -> navigateTo(currentPrefix));
+        if (preSelectedFile != null) {
+            dialog.preSelectFile(preSelectedFile);
+        }
+        dialog.setVisible(true);
+    }
+
+    /**
+     * Accepts a single local file dropped onto the object table and opens it directly in
+     * UploadDialog, pre-selected - see the class javadoc. Only javaFileListFlavor is accepted;
+     * canImport rejects anything else (e.g. a plain text/string drag) outright. A multi-file
+     * drop is accepted by canImport (the flavor itself is still a file-list) but rejected in
+     * importData with a message, so drag-and-drop doesn't implicitly reopen upload's
+     * single-file scope decision.
+     */
+    private TransferHandler fileDropTransferHandler() {
+        return new TransferHandler() {
+            @Override
+            public boolean canImport(TransferSupport support) {
+                return support.isDataFlavorSupported(DataFlavor.javaFileListFlavor);
+            }
+
+            @Override
+            @SuppressWarnings("unchecked")
+            public boolean importData(TransferSupport support) {
+                if (!canImport(support)) {
+                    return false;
+                }
+                List<File> files;
+                try {
+                    files = (List<File>) support.getTransferable().getTransferData(DataFlavor.javaFileListFlavor);
+                } catch (Exception e) {
+                    log.warn("Failed to read dropped file list", e);
+                    return false;
+                }
+                if (files.size() != 1) {
+                    JOptionPane.showMessageDialog(ObjectBrowserPanel.this, "Drop a single file to upload.");
+                    return false;
+                }
+                openUploadDialog(files.get(0));
+                return true;
+            }
+        };
     }
 
     /**

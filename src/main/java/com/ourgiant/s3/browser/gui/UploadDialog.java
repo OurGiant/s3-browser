@@ -140,7 +140,19 @@ public class UploadDialog extends JDialog {
         if (result != JFileChooser.APPROVE_OPTION) {
             return;
         }
-        selectedFile = chooser.getSelectedFile();
+        selectFile(chooser.getSelectedFile());
+    }
+
+    /** Pre-selects a file dropped onto the object browser (see ObjectBrowserPanel's
+     *  TransferHandler) - call after construction, before setVisible(true). Reuses the exact
+     *  same selection/confirmation/upload path as choosing a file via the picker, so a drop
+     *  still requires an explicit click on Upload rather than firing immediately. */
+    public void preSelectFile(File file) {
+        selectFile(file);
+    }
+
+    private void selectFile(File file) {
+        selectedFile = file;
         fileLabel.setText(selectedFile.getName() + " (" + SizeFormatter.humanReadable(selectedFile.length()) + ")");
         keyField.setText(UploadKeys.defaultKey(currentPrefix, selectedFile.getName()));
         uploadButton.setEnabled(true);
