@@ -1,5 +1,6 @@
 package com.ourgiant.s3.browser.gui;
 
+import com.ourgiant.s3.browser.core.GetObjectRequests;
 import com.ourgiant.s3.browser.core.ObjectGridModel;
 import com.ourgiant.s3.browser.core.ObjectListRequests;
 import com.ourgiant.s3.browser.core.S3Arns;
@@ -13,12 +14,15 @@ import software.amazon.awssdk.services.s3.model.ListObjectsV2Response;
 import javax.swing.BorderFactory;
 import javax.swing.JButton;
 import javax.swing.JComponent;
+import javax.swing.JFileChooser;
 import javax.swing.JLabel;
 import javax.swing.JOptionPane;
 import javax.swing.JPanel;
+import javax.swing.JProgressBar;
 import javax.swing.JScrollPane;
 import javax.swing.JTable;
 import javax.swing.ListSelectionModel;
+import javax.swing.SwingWorker;
 import javax.swing.table.DefaultTableModel;
 import javax.swing.table.TableCellRenderer;
 import java.awt.BorderLayout;
@@ -29,6 +33,9 @@ import java.awt.Frame;
 import java.awt.Insets;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
+import java.io.File;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.List;
 
@@ -39,9 +46,11 @@ import java.util.List;
  * ObjectDetailDialog). The breadcrumb row rebuilds on every navigation so any ancestor segment
  * (or the bucket root) is a one-click jump back, not just "Up one level." The Upload button
  * opens UploadDialog, uploading into whatever prefix is currently being browsed; a successful
- * upload refreshes the current listing so the new object shows up immediately. Copy Bucket
- * ARN/Copy Bucket URL copy the current bucket's identifiers to the clipboard (see core.S3Arns);
- * the per-object equivalents live in ObjectDetailDialog.
+ * upload refreshes the current listing so the new object shows up immediately. The Download
+ * button saves the selected object to a local file via GetObject, mirroring Upload's
+ * overwrite-confirmation caution in reverse (see downloadSelectedEntry). Copy Bucket ARN/Copy
+ * Bucket URL copy the current bucket's identifiers to the clipboard (see core.S3Arns); the
+ * per-object equivalents live in ObjectDetailDialog.
  */
 public class ObjectBrowserPanel extends JPanel {
     private static final Logger log = LoggerFactory.getLogger(ObjectBrowserPanel.class);
@@ -59,6 +68,8 @@ public class ObjectBrowserPanel extends JPanel {
     private DefaultTableModel tableModel;
     private JTable table;
     private JButton loadMoreButton;
+    private JButton downloadButton;
+    private JProgressBar downloadProgressBar;
     private final List<S3Entry> allEntries = new ArrayList<>();
     private String nextToken;
 
@@ -128,11 +139,18 @@ public class ObjectBrowserPanel extends JPanel {
         viewDetailsButton.addActionListener(e -> openSelectedEntry());
         JButton uploadButton = new JButton("Upload");
         uploadButton.addActionListener(e -> openUploadDialog());
+        downloadButton = new JButton("Download");
+        downloadButton.addActionListener(e -> downloadSelectedEntry());
+        downloadProgressBar = new JProgressBar();
+        downloadProgressBar.setIndeterminate(true);
+        downloadProgressBar.setVisible(false);
         loadMoreButton = new JButton("Load More");
         loadMoreButton.addActionListener(e -> loadMore());
         loadMoreButton.setEnabled(false);
         bottomPanel.add(viewDetailsButton);
         bottomPanel.add(uploadButton);
+        bottomPanel.add(downloadButton);
+        bottomPanel.add(downloadProgressBar);
         bottomPanel.add(loadMoreButton);
         add(bottomPanel, BorderLayout.SOUTH);
     }
@@ -233,6 +251,78 @@ public class ObjectBrowserPanel extends JPanel {
 
     private void openUploadDialog() {
         new UploadDialog(owner, s3, currentBucket, currentPrefix, () -> navigateTo(currentPrefix)).setVisible(true);
+    }
+
+    /**
+     * Saves the selected object to a local file via GetObject. Mirrors Upload's
+     * overwrite-confirmation caution in reverse: if the chosen local save path already exists,
+     * this asks before clobbering it, same "don't silently destroy something" ethos as Upload's
+     * HeadObject-before-PutObject check - just against the local filesystem instead of S3, so a
+     * plain Files.exists check is enough (no AWS call needed).
+     */
+    private void downloadSelectedEntry() {
+        int viewRow = table.getSelectedRow();
+        if (viewRow < 0) {
+            JOptionPane.showMessageDialog(this, "Select an object to download.");
+            return;
+        }
+        int modelRow = table.convertRowIndexToModel(viewRow);
+        if (modelRow < 0 || modelRow >= allEntries.size()) {
+            return;
+        }
+        S3Entry entry = allEntries.get(modelRow);
+        if (entry.type != S3Entry.Type.OBJECT) {
+            JOptionPane.showMessageDialog(this, "Select an object (not a folder) to download.");
+            return;
+        }
+
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Save As");
+        chooser.setSelectedFile(new File(entry.displayName));
+        if (chooser.showSaveDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        File destination = chooser.getSelectedFile();
+
+        if (destination.exists()) {
+            int confirm = JOptionPane.showConfirmDialog(this,
+                "\"" + destination.getName() + "\" already exists.\nOverwrite it?",
+                "Confirm Overwrite", JOptionPane.YES_NO_OPTION, JOptionPane.WARNING_MESSAGE);
+            if (confirm != JOptionPane.YES_OPTION) {
+                return;
+            }
+        }
+
+        String key = entry.key;
+        Path destinationPath = destination.toPath();
+        downloadButton.setEnabled(false);
+        downloadProgressBar.setVisible(true);
+
+        new SwingWorker<Void, Void>() {
+            @Override
+            protected Void doInBackground() throws Exception {
+                // getObject(request, Path) creates the destination file fresh, so clear any
+                // existing file the user just confirmed overwriting first.
+                Files.deleteIfExists(destinationPath);
+                s3.getObject(GetObjectRequests.build(currentBucket, key), destinationPath);
+                return null;
+            }
+
+            @Override
+            protected void done() {
+                downloadButton.setEnabled(true);
+                downloadProgressBar.setVisible(false);
+                try {
+                    get();
+                } catch (Exception e) {
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    log.error("Download failed for {}/{}", currentBucket, key, cause);
+                    JOptionPane.showMessageDialog(ObjectBrowserPanel.this,
+                        "Download failed: " + (cause.getMessage() != null ? cause.getMessage() : cause.getClass().getSimpleName()),
+                        "Download Error", JOptionPane.ERROR_MESSAGE);
+                }
+            }
+        }.execute();
     }
 
     private void openSelectedEntry() {

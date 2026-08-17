@@ -15,6 +15,7 @@ A Java Swing desktop application for browsing AWS S3 buckets and objects. Connec
 - **Prefix/folder-style object browsing**: Drills into a bucket like a file manager — folders are S3 "common prefixes," not real objects, so navigating never lists more of the bucket than the current level. A clickable breadcrumb (bucket root plus every path segment) jumps back to any ancestor in one click; paginated via Load More for buckets with more than 1000 keys at a level
 - **Object metadata detail**: Double-click an object (or select + View Details) for size/storage class/last-modified (already known from the listing) plus content-type, encryption (including the KMS key ID for SSE-KMS objects), version ID, and user metadata — loaded in the background via a separate `HeadObject` call, since `ListObjectsV2` doesn't carry those
 - **Upload**: Pick a local file and upload it into the currently browsed bucket/prefix, with the destination key defaulted to the current prefix + filename (editable). Since S3 has no versioning by default, uploading to an existing key would silently overwrite it — so before ever calling `PutObject`, the destination is checked with `HeadObject` and an explicit overwrite confirmation is required if something's already there. A simple indeterminate progress indicator shows during the upload, not a byte-level progress bar
+- **Download**: Select an object in the object browser and save it to disk via `GetObject`, defaulting the Save As dialog to the object's basename. If the chosen local file already exists, an explicit overwrite confirmation is required first — the same "don't silently destroy something" caution as Upload's overwrite check, just against the local filesystem instead of S3. Single object at a time, with the same simple indeterminate progress indicator as Upload
 - **Copy ARN / Copy S3 URL**: One-click clipboard copy for both buckets (from the object browser's top bar) and individual objects (from the detail view) — the ARN (`arn:aws:s3:::bucket[/key]`) and the `s3://bucket/key` URI, for pasting into IaC, CLI commands, or other tooling
 - **Persistent settings**: Remembers the last-used AWS profile and region between sessions
 - **FlatLaf theming**: Switchable Light/Dark/IntelliJ themes via the View menu
@@ -22,7 +23,7 @@ A Java Swing desktop application for browsing AWS S3 buckets and objects. Connec
 
 ## Scope
 
-This is primarily a **browse** tool, mirroring dynamodb-client's and lambda-inspector's "browse, don't mutate destructively" ethos. The one mutating action is uploading a file (see Features above), which always confirms before overwriting an existing object. No delete, no bucket mutation, no ACL/policy changes, and no batch/folder upload — single file at a time. If scope grows beyond that, it should get the same explicit confirmation-dialog treatment the upload-overwrite check already has, not be added silently.
+This is primarily a **browse** tool, mirroring dynamodb-client's and lambda-inspector's "browse, don't mutate destructively" ethos. The one mutating AWS action is uploading a file (see Features above), which always confirms before overwriting an existing object; downloading is a read-only `GetObject` call, so it isn't mutating AWS state, but still confirms before overwriting a local file for the same reason. No delete, no bucket mutation, no ACL/policy changes, and no batch/folder upload or download — single object at a time. If scope grows beyond that, it should get the same explicit confirmation-dialog treatment the upload-overwrite check already has, not be added silently.
 
 ## Prerequisites
 
@@ -37,7 +38,7 @@ The connected AWS profile needs at least the following actions:
 - `sts:GetCallerIdentity` — verifying a profile's credentials are active and showing its account ID in the window title
 - `s3:ListAllMyBuckets` — the bucket list
 - `s3:ListBucket` — object/prefix browsing within a bucket
-- `s3:GetObject` — technically covers `HeadObject` too, but `HeadObject` is what's actually called for the object metadata detail view and the upload dialog's overwrite check; a policy scoped to `s3:GetObject` covers it
+- `s3:GetObject` — downloading an object to disk; also technically covers `HeadObject`, which is what's actually called for the object metadata detail view and the upload dialog's overwrite check, so a policy scoped to `s3:GetObject` covers both
 - `s3:PutObject` — upload; this is the app's only mutating AWS action (see [Scope](#scope))
 
 This list will grow if the [Scope](#scope) below ever changes; each addition is documented here alongside the code, not just implemented silently (see `.claude/skills/ship-issue/SKILL.md`).
