@@ -264,9 +264,10 @@ public class MainWindow extends JFrame {
             prefs.setAwsProfile(profile);
             prefs.setAwsRegion(region);
 
+            ProfileCredentialsProvider credentialsProvider = ProfileCredentialsProvider.create(profile);
             s3 = S3Client.builder()
                 .region(Region.of(region))
-                .credentialsProvider(ProfileCredentialsProvider.create(profile))
+                .credentialsProvider(credentialsProvider)
                 .build();
 
             setTitle(ConnectionMessages.windowTitle(connectedProfile, connectedAccountId, connectedRegion));
@@ -277,6 +278,7 @@ public class MainWindow extends JFrame {
             }
             bucketListPanel.setClient(s3);
             objectBrowserPanel.setClient(s3);
+            objectBrowserPanel.setConsoleContext(credentialsProvider, region);
             cardLayout.show(cardPanel, CARD_BUCKETS);
             bucketListPanel.loadInitial();
             return true;
