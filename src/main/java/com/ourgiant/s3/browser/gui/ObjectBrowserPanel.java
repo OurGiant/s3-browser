@@ -1,11 +1,14 @@
 package com.ourgiant.s3.browser.gui;
 
 import com.ourgiant.s3.browser.core.AwsConsoleLauncher;
+import com.ourgiant.s3.browser.core.BatchUploadPlanner;
 import com.ourgiant.s3.browser.core.GetObjectRequests;
+import com.ourgiant.s3.browser.core.LocalUploadItem;
 import com.ourgiant.s3.browser.core.ObjectGridModel;
 import com.ourgiant.s3.browser.core.ObjectListRequests;
 import com.ourgiant.s3.browser.core.S3Arns;
 import com.ourgiant.s3.browser.core.S3ConsoleUrls;
+import com.ourgiant.s3.browser.core.SizeFormatter;
 import com.ourgiant.s3.browser.model.S3Entry;
 import org.openqa.selenium.WebDriver;
 import org.openqa.selenium.chrome.ChromeDriver;
@@ -44,6 +47,7 @@ import java.awt.datatransfer.DataFlavor;
 import java.awt.event.MouseAdapter;
 import java.awt.event.MouseEvent;
 import java.io.File;
+import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -68,6 +72,12 @@ import java.util.List;
  * table pre-selects it in the same UploadDialog the Upload button opens (see
  * fileDropTransferHandler) - a faster path to the picker, not a bypass of it; the user still
  * confirms via the Upload button, and a multi-file drop is rejected with a message rather than
+ * silently reopening upload's single-file scope (that's what Upload Multiple is for). Upload
+ * Multiple opens a FILES_AND_DIRECTORIES multi-select picker, plans the selection into a flat
+ * file-to-key list (see core.BatchUploadPlanner - a folder is walked recursively, preserving its
+ * own name as a subprefix), confirms the batch's total count/size up front, then hands the plan
+ * to BatchUploadDialog for aggregate overwrite confirmation, determinate progress, and a
+ * skip-and-continue-on-failure summary.
  * silently reopening upload's single-file scope.
  */
 public class ObjectBrowserPanel extends JPanel {
@@ -167,6 +177,8 @@ public class ObjectBrowserPanel extends JPanel {
         viewDetailsButton.addActionListener(e -> openSelectedEntry());
         JButton uploadButton = new JButton("Upload");
         uploadButton.addActionListener(e -> openUploadDialog());
+        JButton uploadMultipleButton = new JButton("Upload Multiple...");
+        uploadMultipleButton.addActionListener(e -> openBatchUploadDialog());
         downloadButton = new JButton("Download");
         downloadButton.addActionListener(e -> downloadSelectedEntry());
         downloadProgressBar = new JProgressBar();
@@ -177,6 +189,7 @@ public class ObjectBrowserPanel extends JPanel {
         loadMoreButton.setEnabled(false);
         bottomPanel.add(viewDetailsButton);
         bottomPanel.add(uploadButton);
+        bottomPanel.add(uploadMultipleButton);
         bottomPanel.add(downloadButton);
         bottomPanel.add(downloadProgressBar);
         bottomPanel.add(loadMoreButton);
@@ -295,6 +308,53 @@ public class ObjectBrowserPanel extends JPanel {
             dialog.preSelectFile(preSelectedFile);
         }
         dialog.setVisible(true);
+    }
+
+    /**
+     * Lets the user pick any mix of local files and/or folders in one dialog, plans the
+     * selection into a flat file-to-key list (see core.BatchUploadPlanner), confirms the
+     * batch's total count/size up front (a safety net against an unexpectedly huge folder), and
+     * only then hands the confirmed plan to BatchUploadDialog for the rest (aggregate overwrite
+     * confirmation, progress, failure summary).
+     */
+    private void openBatchUploadDialog() {
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Choose files or folders to upload");
+        chooser.setFileSelectionMode(JFileChooser.FILES_AND_DIRECTORIES);
+        chooser.setMultiSelectionEnabled(true);
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        File[] selection = chooser.getSelectedFiles();
+        if (selection.length == 0) {
+            return;
+        }
+
+        List<LocalUploadItem> planned = BatchUploadPlanner.plan(List.of(selection), currentPrefix);
+        if (planned.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "No files found in that selection.");
+            return;
+        }
+
+        long totalBytes = 0;
+        for (LocalUploadItem item : planned) {
+            try {
+                totalBytes += Files.size(item.localPath());
+            } catch (IOException e) {
+                // best-effort total for the confirmation dialog - a file that vanishes between
+                // planning and sizing just doesn't count toward the estimate shown here
+            }
+        }
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+            "Upload " + planned.size() + " files (" + SizeFormatter.humanReadable(totalBytes) + ") to "
+                + currentBucket + "?",
+            "Confirm Batch Upload", JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) {
+            return;
+        }
+
+        new BatchUploadDialog(owner, s3, currentBucket, planned, () -> navigateTo(currentPrefix)).setVisible(true);
     }
 
     /**
