@@ -1,11 +1,15 @@
 package com.ourgiant.s3.browser.gui;
 
 import com.ourgiant.s3.browser.core.AwsConsoleLauncher;
+import com.ourgiant.s3.browser.core.BatchDownloadPlanner;
 import com.ourgiant.s3.browser.core.BatchUploadPlanner;
 import com.ourgiant.s3.browser.core.GetObjectRequests;
+import com.ourgiant.s3.browser.core.KeyAndSize;
 import com.ourgiant.s3.browser.core.LocalUploadItem;
 import com.ourgiant.s3.browser.core.ObjectGridModel;
 import com.ourgiant.s3.browser.core.ObjectListRequests;
+import com.ourgiant.s3.browser.core.RecursiveObjectListing;
+import com.ourgiant.s3.browser.core.RemoteDownloadItem;
 import com.ourgiant.s3.browser.core.S3Arns;
 import com.ourgiant.s3.browser.core.S3ConsoleUrls;
 import com.ourgiant.s3.browser.core.SizeFormatter;
@@ -77,8 +81,13 @@ import java.util.List;
  * file-to-key list (see core.BatchUploadPlanner - a folder is walked recursively, preserving its
  * own name as a subprefix), confirms the batch's total count/size up front, then hands the plan
  * to BatchUploadDialog for aggregate overwrite confirmation, determinate progress, and a
- * skip-and-continue-on-failure summary.
- * silently reopening upload's single-file scope.
+ * skip-and-continue-on-failure summary. Download Selected mirrors that on the way out: the
+ * table allows multi-selecting any mix of OBJECT and FOLDER rows, folders in the selection are
+ * recursively expanded (see core.RecursiveObjectListing - a full listing, not the one-level
+ * delimiter trick ObjectListRequests uses for browsing), the combined batch's count/size is
+ * confirmed up front the same way, and the plan (see core.BatchDownloadPlanner, which mirrors
+ * BatchUploadPlanner in reverse) goes to BatchDownloadDialog for the same aggregate-confirm/
+ * progress/failure-summary shape. The single-object Download button is unchanged.
  */
 public class ObjectBrowserPanel extends JPanel {
     private static final Logger log = LoggerFactory.getLogger(ObjectBrowserPanel.class);
@@ -100,6 +109,7 @@ public class ObjectBrowserPanel extends JPanel {
     private JTable table;
     private JButton loadMoreButton;
     private JButton downloadButton;
+    private JButton downloadSelectedButton;
     private JProgressBar downloadProgressBar;
     private JButton openInConsoleButton;
     private final List<S3Entry> allEntries = new ArrayList<>();
@@ -159,7 +169,7 @@ public class ObjectBrowserPanel extends JPanel {
             jComponent.putClientProperty("html.disable", Boolean.TRUE);
         }
         table.setAutoCreateRowSorter(true);
-        table.setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+        table.setSelectionMode(ListSelectionModel.MULTIPLE_INTERVAL_SELECTION);
         table.addMouseListener(new MouseAdapter() {
             @Override
             public void mouseClicked(MouseEvent e) {
@@ -181,6 +191,8 @@ public class ObjectBrowserPanel extends JPanel {
         uploadMultipleButton.addActionListener(e -> openBatchUploadDialog());
         downloadButton = new JButton("Download");
         downloadButton.addActionListener(e -> downloadSelectedEntry());
+        downloadSelectedButton = new JButton("Download Selected");
+        downloadSelectedButton.addActionListener(e -> downloadSelectedEntries());
         downloadProgressBar = new JProgressBar();
         downloadProgressBar.setIndeterminate(true);
         downloadProgressBar.setVisible(false);
@@ -191,6 +203,7 @@ public class ObjectBrowserPanel extends JPanel {
         bottomPanel.add(uploadButton);
         bottomPanel.add(uploadMultipleButton);
         bottomPanel.add(downloadButton);
+        bottomPanel.add(downloadSelectedButton);
         bottomPanel.add(downloadProgressBar);
         bottomPanel.add(loadMoreButton);
         add(bottomPanel, BorderLayout.SOUTH);
@@ -470,6 +483,10 @@ public class ObjectBrowserPanel extends JPanel {
      * plain Files.exists check is enough (no AWS call needed).
      */
     private void downloadSelectedEntry() {
+        if (table.getSelectedRowCount() > 1) {
+            JOptionPane.showMessageDialog(this, "Select exactly one object to download, or use Download Selected for multiple.");
+            return;
+        }
         int viewRow = table.getSelectedRow();
         if (viewRow < 0) {
             JOptionPane.showMessageDialog(this, "Select an object to download.");
@@ -532,6 +549,140 @@ public class ObjectBrowserPanel extends JPanel {
                 }
             }
         }.execute();
+    }
+
+    /**
+     * Downloads every currently selected row - any mix of OBJECT and FOLDER entries. A selected
+     * folder is recursively expanded first (see core.RecursiveObjectListing), since the
+     * multi-row selection and "download this folder" cases turn out to be the same action: a
+     * folder download is just a batch of one folder. Once the full object list and total size
+     * are known, the batch's count/size is confirmed up front (a safety net against an
+     * unexpectedly huge folder) before ever picking a destination or touching the filesystem.
+     */
+    private void downloadSelectedEntries() {
+        List<S3Entry> selected = selectedEntries();
+        if (selected.isEmpty()) {
+            JOptionPane.showMessageDialog(this, "Select at least one object or folder to download.");
+            return;
+        }
+
+        List<S3Entry> directObjects = new ArrayList<>();
+        List<S3Entry> folders = new ArrayList<>();
+        for (S3Entry entry : selected) {
+            if (entry.type == S3Entry.Type.OBJECT) {
+                directObjects.add(entry);
+            } else {
+                folders.add(entry);
+            }
+        }
+
+        if (folders.isEmpty()) {
+            proceedWithBatchDownload(directGroup(directObjects), List.of());
+            return;
+        }
+
+        downloadSelectedButton.setEnabled(false);
+        downloadSelectedButton.setText("Listing...");
+        String bucket = currentBucket;
+
+        new SwingWorker<List<DownloadGroup>, Void>() {
+            @Override
+            protected List<DownloadGroup> doInBackground() {
+                List<DownloadGroup> folderGroups = new ArrayList<>();
+                for (S3Entry folder : folders) {
+                    List<KeyAndSize> items = RecursiveObjectListing.listAll(s3, bucket, folder.key).stream()
+                        .map(object -> new KeyAndSize(object.key(), object.size()))
+                        .toList();
+                    folderGroups.add(new DownloadGroup(folder.key, folder.displayName, items));
+                }
+                return folderGroups;
+            }
+
+            @Override
+            protected void done() {
+                downloadSelectedButton.setEnabled(true);
+                downloadSelectedButton.setText("Download Selected");
+                List<DownloadGroup> folderGroups;
+                try {
+                    folderGroups = get();
+                } catch (Exception e) {
+                    Throwable cause = e.getCause() != null ? e.getCause() : e;
+                    log.error("Failed to list folder contents for batch download in bucket {}", bucket, cause);
+                    JOptionPane.showMessageDialog(ObjectBrowserPanel.this,
+                        "Failed to list folder contents: " + (cause.getMessage() != null ? cause.getMessage() : cause.getClass().getSimpleName()),
+                        "Listing Error", JOptionPane.ERROR_MESSAGE);
+                    return;
+                }
+                proceedWithBatchDownload(directGroup(directObjects), folderGroups);
+            }
+        }.execute();
+    }
+
+    private DownloadGroup directGroup(List<S3Entry> directObjects) {
+        List<KeyAndSize> items = directObjects.stream()
+            .map(entry -> new KeyAndSize(entry.key, entry.size != null ? entry.size : 0))
+            .toList();
+        return new DownloadGroup(currentPrefix, null, items);
+    }
+
+    private void proceedWithBatchDownload(DownloadGroup directGroup, List<DownloadGroup> folderGroups) {
+        List<DownloadGroup> allGroups = new ArrayList<>();
+        if (!directGroup.items().isEmpty()) {
+            allGroups.add(directGroup);
+        }
+        allGroups.addAll(folderGroups);
+
+        long totalCount = allGroups.stream().mapToLong(group -> group.items().size()).sum();
+        if (totalCount == 0) {
+            JOptionPane.showMessageDialog(this, "No objects found in that selection.");
+            return;
+        }
+        long totalBytes = allGroups.stream().flatMap(group -> group.items().stream()).mapToLong(KeyAndSize::size).sum();
+
+        int confirm = JOptionPane.showConfirmDialog(this,
+            "Download " + totalCount + " objects (" + SizeFormatter.humanReadable(totalBytes) + ") from "
+                + currentBucket + "?",
+            "Confirm Batch Download", JOptionPane.OK_CANCEL_OPTION);
+        if (confirm != JOptionPane.OK_OPTION) {
+            return;
+        }
+
+        JFileChooser chooser = new JFileChooser();
+        chooser.setDialogTitle("Choose a folder to save into");
+        chooser.setFileSelectionMode(JFileChooser.DIRECTORIES_ONLY);
+        if (chooser.showOpenDialog(this) != JFileChooser.APPROVE_OPTION) {
+            return;
+        }
+        Path destinationDir = chooser.getSelectedFile().toPath();
+
+        List<RemoteDownloadItem> planned = new ArrayList<>();
+        for (DownloadGroup group : allGroups) {
+            Path groupDestination = group.folderDisplayName() != null
+                ? destinationDir.resolve(group.folderDisplayName())
+                : destinationDir;
+            planned.addAll(BatchDownloadPlanner.plan(group.items(), group.basePrefix(), groupDestination));
+        }
+
+        new BatchDownloadDialog(owner, s3, currentBucket, planned, () -> navigateTo(currentPrefix)).setVisible(true);
+    }
+
+    private List<S3Entry> selectedEntries() {
+        List<S3Entry> selected = new ArrayList<>();
+        for (int viewRow : table.getSelectedRows()) {
+            int modelRow = table.convertRowIndexToModel(viewRow);
+            if (modelRow >= 0 && modelRow < allEntries.size()) {
+                selected.add(allEntries.get(modelRow));
+            }
+        }
+        return selected;
+    }
+
+    /** basePrefix/items to plan with core.BatchDownloadPlanner - folderDisplayName is null for
+     *  the group of directly-selected objects (they land straight in the chosen destination
+     *  directory), or a folder's display name for a folder's recursively-listed contents
+     *  (nested one level deeper under the destination, preserving the folder's own name -
+     *  mirrors core.BatchUploadPlanner preserving an uploaded folder's name as an S3 subprefix). */
+    private record DownloadGroup(String basePrefix, String folderDisplayName, List<KeyAndSize> items) {
     }
 
     private void openSelectedEntry() {
