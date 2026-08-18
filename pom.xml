@@ -7,7 +7,7 @@
 
     <groupId>com.ourgiant.s3</groupId>
     <artifactId>s3-browser</artifactId>
-    <version>0.1.5</version>
+    <version>0.1.6</version>
     <packaging>jar</packaging>
 
     <name>S3 Browser</name>
