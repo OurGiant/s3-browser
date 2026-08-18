@@ -63,7 +63,10 @@ import java.util.List;
  * not real objects (see core.ObjectGridModel) - double-clicking one navigates deeper without a
  * full-bucket listing; double-clicking a real object opens its metadata (see
  * ObjectDetailDialog). The breadcrumb row rebuilds on every navigation so any ancestor segment
- * (or the bucket root) is a one-click jump back, not just "Up one level." The Upload button
+ * (or the bucket root) is a one-click jump back, not just "Up one level" - it leads with a
+ * clickable "s3" root segment (back to the bucket list, same destination as the All Buckets
+ * button - that button stays, this is just a second, more contextually obvious way there) ahead
+ * of the bucket name, so the full path reads "s3 > bucket > prefix > ...". The Upload button
  * opens UploadDialog, uploading into whatever prefix is currently being browsed; a successful
  * upload refreshes the current listing so the new object shows up immediately. The Download
  * button saves the selected object to a local file via GetObject, mirroring Upload's
@@ -241,6 +244,11 @@ public class ObjectBrowserPanel extends JPanel {
 
     private void rebuildBreadcrumb() {
         breadcrumbPanel.removeAll();
+
+        JButton s3RootButton = linkButton("s3");
+        s3RootButton.addActionListener(e -> onBackToBuckets.run());
+        breadcrumbPanel.add(s3RootButton);
+        breadcrumbPanel.add(new JLabel(" / "));
 
         JButton rootButton = linkButton(currentBucket);
         rootButton.addActionListener(e -> navigateTo(""));
